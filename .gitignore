@@ -3,3 +3,10 @@ log_distribuido.txt
 log_concorrente.txt
 gabarito_concorrente.csv
 gabarito_distribuido.csv
+analyzer_seq.exe
+analyzer_par_critical.exe
+analyzer_par_atomic.exe
+analyzer_par_lock.exe
+results.csv
+sorted_res.csv
+sorted_gab.csv
