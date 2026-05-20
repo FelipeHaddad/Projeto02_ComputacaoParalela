@@ -17,8 +17,7 @@ int main(int argc, char* argv[]) {
     const char *manifest_path = (argc >= 3) ? argv[2] : "manifest.txt";
     const char *output_path = (argc >= 4) ? argv[3] : "results.csv";
 
-    /* FASE 1: Construir Hash Table (Manifest) */
-    clock_t inicio = clock();
+    /* FASE 1: Construir Hash Table (Manifest) - INÍCIO DA MEDIÇÃO */
     HashTable* ht = ht_create(HASH_SIZE);
     FILE* fp_manifest = fopen(manifest_path, "r");
     if (!fp_manifest) { perror("Erro ao abrir manifest"); return EXIT_FAILURE; }
@@ -30,8 +29,8 @@ int main(int argc, char* argv[]) {
     }
     fclose(fp_manifest);
 
-    /* FASE 2: Processamento do Log  */
-
+    /* FASE 2: Processamento do Log */
+    clock_t inicio = clock();
     FILE* fp_log = fopen(log_path, "r");
     if (!fp_log) { perror("Erro ao abrir log"); ht_destroy(ht); return EXIT_FAILURE; }
 
