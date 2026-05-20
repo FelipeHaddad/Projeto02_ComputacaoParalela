@@ -30,6 +30,7 @@ int main(int argc, char* argv[]) {
     for(int i = 0; i < HASH_SIZE; i++) omp_init_lock(&locks[i]);
 
     // --- FASE 1: Construção da Tabela (Sequencial) ---
+    clock_t inicio = clock();
     FILE* fp_manifest = fopen("manifest.txt", "r");
     if (!fp_manifest) { perror("Erro ao abrir manifest"); return EXIT_FAILURE; }
     
@@ -97,10 +98,13 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-
+     clock_t fim = clock();
     // --- FASE 4: Resultados ---
     ht_save_results(ht, "results.csv");
     ht_destroy(ht);
+
+    double elapsed = (double)(fim - inicio) / CLOCKS_PER_SEC;
+    printf("Tempo de processamento: %.3f segundos\n", elapsed);
     
     // Liberação de memória
     for(int i = 0; i < HASH_SIZE; i++) omp_destroy_lock(&locks[i]);
