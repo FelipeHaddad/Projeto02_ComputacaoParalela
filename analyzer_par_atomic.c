@@ -7,24 +7,21 @@
 
 #define HASH_SIZE 131071
 #define MAX_LINE_LEN 8192
-#define MAX_URL_LEN 2048
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Uso: %s <arquivo_de_log> [manifest.txt] [results.csv]\n", argv[0]);
+        fprintf(stderr, "Uso: %s <arquivo_de_log>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
     const char *log_path = argv[1];
-    const char *manifest_path = (argc >= 3) ? argv[2] : "manifest.txt";
-    const char *output_path = (argc >= 4) ? argv[3] : "results.csv";
-
-    clock_t inicio = clock();
-
-    /* FASE 1: Hash Table */
     HashTable* ht = ht_create(HASH_SIZE);
-    FILE* fp_manifest = fopen(manifest_path, "r");
-    if (!fp_manifest) { perror("Erro manifest"); return EXIT_FAILURE; }
+
+    // --- FASE 1: Construção da Tabela (Sequencial) ---
+    clock_t inicio = clock();
+    FILE* fp_manifest = fopen("manifest.txt", "r");
+    if (!fp_manifest) { perror("Erro ao abrir manifest"); return EXIT_FAILURE; }
+    
     char line[MAX_LINE_LEN];
     while (fgets(line, sizeof(line), fp_manifest)) {
         line[strcspn(line, "\r\n")] = '\0';
@@ -32,46 +29,64 @@ int main(int argc, char* argv[]) {
     }
     fclose(fp_manifest);
 
-    /* FASE 2: Leitura com realocação dinâmica (Segurança contra Segfault) */
+    // --- FASE 2: Carregamento dos Logs em memória ---
     FILE* fp_log = fopen(log_path, "r");
-    if (!fp_log) { perror("Erro log"); ht_destroy(ht); return EXIT_FAILURE; }
+    if (!fp_log) { perror("Erro ao abrir log"); ht_destroy(ht); return EXIT_FAILURE; }
+    
+    fseek(fp_log, 0, SEEK_END);
+    long fsize = ftell(fp_log);
+    rewind(fp_log);
 
-    size_t cap = 10000; 
-    size_t count = 0;
-    char** url_list = malloc(sizeof(char*) * cap);
-
-    char url_temp[MAX_URL_LEN];
-    while (fgets(line, sizeof(line), fp_log)) {
-        if (sscanf(line, "%*s %*s %*s %*s %*s \"%*s %2047s", url_temp) == 1) {
-            if (count >= cap) {
-                cap *= 2;
-                url_list = realloc(url_list, sizeof(char*) * cap);
-            }
-            url_list[count++] = strdup(url_temp);
-        }
+    char *buffer = malloc(fsize + 1);
+    size_t bytes_lidos = fread(buffer, 1, fsize, fp_log);
+    if (bytes_lidos != (size_t)fsize) {
+        fprintf(stderr, "Erro ao ler o log completo.\n");
+        free(buffer);
+        fclose(fp_log);
+        ht_destroy(ht);
+        return EXIT_FAILURE;
     }
+    buffer[fsize] = '\0';
     fclose(fp_log);
 
-    /* FASE 3: Processamento com verificação de ponteiro NULL */
-    #pragma omp parallel for
-    for (size_t i = 0; i < count; i++) {
-        if (url_list[i] == NULL) continue;
-        
-        CacheNode* node = ht_get(ht, url_list[i]);
-        if (node != NULL) {
-            #pragma omp atomic update
-            node->hit_count++;
+    int num_lines = 0;
+    for(int i = 0; i < fsize; i++) if(buffer[i] == '\n') num_lines++;
+    char **lines = malloc(num_lines * sizeof(char*));
+    
+    int idx = 0;
+    lines[idx++] = buffer;
+    for(int i = 0; i < fsize; i++) {
+        if(buffer[i] == '\n') {
+            buffer[i] = '\0';
+            if(idx < num_lines) lines[idx++] = &buffer[i+1];
         }
     }
 
+    // --- FASE 3: Processamento Paralelo com Atomic ---
+    #pragma omp parallel for
+    for (int i = 0; i < num_lines; i++) {
+        char url[2048];
+        if (sscanf(lines[i], "%*s %*s %*s %*s %*s \"%*s %2047s", url) == 1) {
+            CacheNode* node = ht_get(ht, url);
+            
+            // O atomic garante que o incremento ocorre sem interferência,
+            // mas sem o custo elevado de uma critical section.
+            if (node) {
+                #pragma omp atomic
+                node->hit_count++;
+            }
+        }
+    }
     clock_t fim = clock();
-
-    ht_save_results(ht, output_path);
-    printf("Tempo total: %.3f segundos\n", (double)(fim - inicio) / CLOCKS_PER_SEC);
-
-    /* Limpeza */
-    for (size_t i = 0; i < count; i++) free(url_list[i]);
-    free(url_list);
+    
+    double elapsed = (double)(fim - inicio) / CLOCKS_PER_SEC;
+    printf("Tempo de processamento: %.3f segundos\n", elapsed);
+    
+    // --- FASE 4: Resultados ---
+    ht_save_results(ht, "results.csv");
     ht_destroy(ht);
+    free(buffer);
+    free(lines);
+
     return EXIT_SUCCESS;
 }
