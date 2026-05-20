@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "hash_table.h"
 
@@ -11,271 +12,117 @@
 #define MAX_URL_LEN 2048
 #define INITIAL_URL_CAPACITY 1024
 
+// Função para limpar quebras de linha
 static void trim_newline(char *s) {
-    size_t n;
-    if (!s) {
-        return;
-    }
-    n = strcspn(s, "\r\n");
+    size_t n = strcspn(s, "\r\n");
     s[n] = '\0';
 }
 
+// Função para extrair a URL
 static int extract_url(const char *line, char *out_url, size_t out_size) {
-    const char *quote_start;
-    const char *method_end;
-    const char *url_start;
-    const char *url_end;
-    size_t len;
-
-    if (!line || !out_url || out_size == 0) {
-        return 0;
-    }
-
-    quote_start = strchr(line, '\"');
-    if (!quote_start) {
-        return 0;
-    }
+    const char *quote_start = strchr(line, '\"');
+    if (!quote_start) return 0;
     quote_start++;
+    while (*quote_start == ' ') quote_start++;
 
-    while (*quote_start == ' ') {
-        quote_start++;
-    }
+    const char *method_end = strchr(quote_start, ' ');
+    if (!method_end) return 0;
 
-    method_end = strchr(quote_start, ' ');
-    if (!method_end) {
-        return 0;
-    }
-
-    url_start = method_end + 1;
-    while (*url_start == ' ') {
-        url_start++;
-    }
-
-    url_end = strchr(url_start, ' ');
-    if (!url_end || url_end <= url_start) {
-        return 0;
-    }
-
-    len = (size_t)(url_end - url_start);
-    if (len >= out_size) {
-        return 0;
-    }
-
-    memcpy(out_url, url_start, len);
+    size_t len = method_end - quote_start;
+    if (len >= out_size) len = out_size - 1;
+    
+    strncpy(out_url, quote_start, len);
     out_url[len] = '\0';
     return 1;
 }
 
-static size_t hash_djb2_local(const char *str, size_t size) {
-    unsigned long hash = 5381;
-    int c;
-
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + (unsigned long)c;
-    }
-
-    return (size_t)(hash % size);
-}
-
-static int load_manifest(HashTable *ht, const char *manifest_path) {
-    FILE *fp;
+// Funções de carregamento (Manifest e Log) iguais às anteriores...
+int load_manifest(HashTable *ht, const char *manifest_path) {
+    FILE *fp = fopen(manifest_path, "r");
+    if (!fp) return 0;
     char line[MAX_LINE_LEN];
-
-    if (!ht || !manifest_path) {
-        return 0;
-    }
-
-    fp = fopen(manifest_path, "r");
-    if (!fp) {
-        fprintf(stderr, "Erro ao abrir manifest '%s': %s\n", manifest_path, strerror(errno));
-        return 0;
-    }
-
     while (fgets(line, sizeof(line), fp)) {
         trim_newline(line);
-        if (line[0] == '\0') {
-            continue;
-        }
-        ht_put(ht, line);
+        if (line[0] != '\0') ht_put(ht, line);
     }
-
     fclose(fp);
     return 1;
 }
 
-static int push_url(char ***urls, size_t *count, size_t *capacity, const char *url) {
-    char *url_copy;
-    char **new_urls;
-
-    if (!urls || !count || !capacity || !url) {
-        return 0;
-    }
-
-    if (*count == *capacity) {
-        size_t new_capacity = (*capacity == 0) ? INITIAL_URL_CAPACITY : (*capacity * 2);
-        new_urls = (char **)realloc(*urls, new_capacity * sizeof(char *));
-        if (!new_urls) {
-            return 0;
-        }
-        *urls = new_urls;
-        *capacity = new_capacity;
-    }
-
-    url_copy = (char *)malloc(strlen(url) + 1);
-    if (!url_copy) {
-        return 0;
-    }
-    strcpy(url_copy, url);
-
-    (*urls)[*count] = url_copy;
-    (*count)++;
-    return 1;
-}
-
-static void free_urls(char **urls, size_t count) {
-    size_t i;
-    if (!urls) {
-        return;
-    }
-    for (i = 0; i < count; i++) {
-        free(urls[i]);
-    }
-    free(urls);
-}
-
-static int load_log_urls(const char *log_path, char ***urls_out, size_t *count_out) {
-    FILE *fp;
+int load_log_urls(const char *log_path, char ***urls_out, size_t *count_out) {
+    FILE *fp = fopen(log_path, "r");
+    if (!fp) return 0;
+    size_t capacity = INITIAL_URL_CAPACITY;
+    size_t count = 0;
+    char **urls = malloc(sizeof(char *) * capacity);
     char line[MAX_LINE_LEN];
     char url[MAX_URL_LEN];
-    char **urls = NULL;
-    size_t count = 0;
-    size_t capacity = 0;
-
-    if (!log_path || !urls_out || !count_out) {
-        return 0;
-    }
-
-    fp = fopen(log_path, "r");
-    if (!fp) {
-        fprintf(stderr, "Erro ao abrir log '%s': %s\n", log_path, strerror(errno));
-        return 0;
-    }
-
     while (fgets(line, sizeof(line), fp)) {
-        if (!extract_url(line, url, sizeof(url))) {
-            continue;
-        }
-
-        if (!push_url(&urls, &count, &capacity, url)) {
-            fprintf(stderr, "Erro de memória ao carregar URLs do log.\n");
-            free_urls(urls, count);
-            fclose(fp);
-            return 0;
+        if (extract_url(line, url, sizeof(url))) {
+            if (count >= capacity) {
+                capacity *= 2;
+                urls = realloc(urls, sizeof(char *) * capacity);
+            }
+            urls[count++] = strdup(url);
         }
     }
-
     fclose(fp);
     *urls_out = urls;
     *count_out = count;
     return 1;
 }
 
-static omp_lock_t *create_bucket_locks(size_t table_size) {
-    omp_lock_t *locks = (omp_lock_t *)malloc(table_size * sizeof(omp_lock_t));
+// --- FASE 2: Processamento com Bucket Lock ---
+static void process_urls_parallel_lock(HashTable *ht, char **urls, size_t count, omp_lock_t *locks) {
     size_t i;
-
-    if (!locks) {
-        return NULL;
-    }
-
-    for (i = 0; i < table_size; i++) {
-        omp_init_lock(&locks[i]);
-    }
-
-    return locks;
-}
-
-static void destroy_bucket_locks(omp_lock_t *locks, size_t table_size) {
-    size_t i;
-    if (!locks) {
-        return;
-    }
-
-    for (i = 0; i < table_size; i++) {
-        omp_destroy_lock(&locks[i]);
-    }
-    free(locks);
-}
-
-static void process_urls_parallel_bucket_lock(HashTable *ht, char **urls, size_t count, omp_lock_t *locks) {
-    size_t i;
-
-    if (!ht || !urls || !locks) {
-        return;
-    }
-
-#pragma omp parallel for default(none) shared(ht, urls, count, locks) private(i) schedule(static)
+    // Paraleliza o loop
+    #pragma omp parallel for default(none) shared(ht, urls, count, locks) private(i) schedule(static)
     for (i = 0; i < count; i++) {
-        size_t bucket = hash_djb2_local(urls[i], ht->size);
-        CacheNode *node;
+        // Encontra o bucket correto para a URL
+        size_t bucket = hash_djb2(urls[i], ht->size); 
 
+        // Trava apenas o bucket específico (Granularidade Fina)
         omp_set_lock(&locks[bucket]);
-        node = ht_get(ht, urls[i]);
+        
+        CacheNode *node = ht_get(ht, urls[i]);
         if (node) {
             node->hit_count++;
         }
+        
         omp_unset_lock(&locks[bucket]);
     }
 }
 
 int main(int argc, char **argv) {
-    const char *log_path = "log_distribuido.txt";
-    const char *manifest_path = "manifest.txt";
-    const char *output_path = "results.csv";
-    HashTable *ht;
+    const char *log_path = (argc >= 2) ? argv[1] : "log_distribuido.txt";
+    const char *manifest_path = (argc >= 3) ? argv[2] : "manifest.txt";
+    const char *output_path = (argc >= 4) ? argv[3] : "results.csv";
+
+    HashTable *ht = ht_create(HASH_TABLE_SIZE);
+    load_manifest(ht, manifest_path);
+
+    // Inicialização das travas (uma para cada bucket)
+    omp_lock_t *locks = malloc(sizeof(omp_lock_t) * HASH_TABLE_SIZE);
+    for (size_t i = 0; i < HASH_TABLE_SIZE; i++) omp_init_lock(&locks[i]);
+
     char **urls = NULL;
     size_t url_count = 0;
-    omp_lock_t *locks = NULL;
 
-    if (argc >= 2) {
-        log_path = argv[1];
-    }
-    if (argc >= 3) {
-        manifest_path = argv[2];
-    }
-    if (argc >= 4) {
-        output_path = argv[3];
-    }
+    clock_t inicio = clock();
 
-    ht = ht_create(HASH_TABLE_SIZE);
-    if (!ht) {
-        fprintf(stderr, "Falha ao criar hash table.\n");
-        return EXIT_FAILURE;
-    }
+    load_log_urls(log_path, &urls, &url_count);
+    process_urls_parallel_lock(ht, urls, url_count, locks);
 
-    if (!load_manifest(ht, manifest_path)) {
-        ht_destroy(ht);
-        return EXIT_FAILURE;
-    }
+    clock_t fim = clock();
 
-    if (!load_log_urls(log_path, &urls, &url_count)) {
-        ht_destroy(ht);
-        return EXIT_FAILURE;
-    }
-
-    locks = create_bucket_locks(ht->size);
-    if (!locks) {
-        fprintf(stderr, "Falha ao criar locks por bucket.\n");
-        free_urls(urls, url_count);
-        ht_destroy(ht);
-        return EXIT_FAILURE;
-    }
-
-    process_urls_parallel_bucket_lock(ht, urls, url_count, locks);
     ht_save_results(ht, output_path);
+    printf("Tempo total (Bucket Lock): %.3f segundos\n", (double)(fim - inicio) / CLOCKS_PER_SEC);
 
-    destroy_bucket_locks(locks, ht->size);
-    free_urls(urls, url_count);
+    // Limpeza
+    for (size_t i = 0; i < HASH_TABLE_SIZE; i++) omp_destroy_lock(&locks[i]);
+    free(locks);
+    for (size_t i = 0; i < url_count; i++) free(urls[i]);
+    free(urls);
     ht_destroy(ht);
-    return EXIT_SUCCESS;
+    return 0;
 }
