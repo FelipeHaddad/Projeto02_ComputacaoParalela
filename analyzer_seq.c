@@ -1,160 +1,58 @@
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <time.h>
 #include "hash_table.h"
 
-#define HASH_TABLE_SIZE 131071UL
+#define HASH_SIZE 131071
 #define MAX_LINE_LEN 8192
-#define MAX_URL_LEN 2048
 
-static void trim_newline(char *s) {
-    size_t n;
-    if (!s) {
-        return;
-    }
-    n = strcspn(s, "\r\n");
-    s[n] = '\0';
-}
-
-static int extract_url(const char *line, char *out_url, size_t out_size) {
-    const char *quote_start;
-    const char *method_end;
-    const char *url_start;
-    const char *url_end;
-    size_t len;
-
-    if (!line || !out_url || out_size == 0) {
-        return 0;
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Uso: %s <arquivo_de_log> [manifest.txt] [results.csv]\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
-    quote_start = strchr(line, '\"');
-    if (!quote_start) {
-        return 0;
-    }
-    quote_start++;
+    const char *log_path = argv[1];
+    const char *manifest_path = (argc >= 3) ? argv[2] : "manifest.txt";
+    const char *output_path = (argc >= 4) ? argv[3] : "results.csv";
 
-    while (*quote_start == ' ') {
-        quote_start++;
-    }
+    /* FASE 1: Construir Hash Table (Manifest) - FORA DA MEDIÇÃO */
+    HashTable* ht = ht_create(HASH_SIZE);
+    FILE* fp_manifest = fopen(manifest_path, "r");
+    if (!fp_manifest) { perror("Erro ao abrir manifest"); return EXIT_FAILURE; }
 
-    method_end = strchr(quote_start, ' ');
-    if (!method_end) {
-        return 0;
-    }
-
-    url_start = method_end + 1;
-    while (*url_start == ' ') {
-        url_start++;
-    }
-
-    url_end = strchr(url_start, ' ');
-    if (!url_end || url_end <= url_start) {
-        return 0;
-    }
-
-    len = (size_t)(url_end - url_start);
-    if (len >= out_size) {
-        return 0;
-    }
-
-    memcpy(out_url, url_start, len);
-    out_url[len] = '\0';
-    return 1;
-}
-
-static int load_manifest(HashTable *ht, const char *manifest_path) {
-    FILE *fp;
     char line[MAX_LINE_LEN];
-
-    if (!ht || !manifest_path) {
-        return 0;
+    while (fgets(line, sizeof(line), fp_manifest)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] != '\0') ht_put(ht, line);
     }
+    fclose(fp_manifest);
 
-    fp = fopen(manifest_path, "r");
-    if (!fp) {
-        fprintf(stderr, "Erro ao abrir manifest '%s': %s\n", manifest_path, strerror(errno));
-        return 0;
-    }
+    /* FASE 2: Processamento do Log - INÍCIO DA MEDIÇÃO */
+    clock_t inicio = clock();
 
-    while (fgets(line, sizeof(line), fp)) {
-        trim_newline(line);
-        if (line[0] == '\0') {
-            continue;
-        }
-        ht_put(ht, line);
-    }
+    FILE* fp_log = fopen(log_path, "r");
+    if (!fp_log) { perror("Erro ao abrir log"); ht_destroy(ht); return EXIT_FAILURE; }
 
-    fclose(fp);
-    return 1;
-}
-
-static int process_log_seq(HashTable *ht, const char *log_path) {
-    FILE *fp;
-    char line[MAX_LINE_LEN];
-    char url[MAX_URL_LEN];
-
-    if (!ht || !log_path) {
-        return 0;
-    }
-
-    fp = fopen(log_path, "r");
-    if (!fp) {
-        fprintf(stderr, "Erro ao abrir log '%s': %s\n", log_path, strerror(errno));
-        return 0;
-    }
-
-    while (fgets(line, sizeof(line), fp)) {
-        CacheNode *node;
-
-        if (!extract_url(line, url, sizeof(url))) {
-            continue;
-        }
-
-        node = ht_get(ht, url);
-        if (node) {
-            node->hit_count++;
+    char url[2048];
+    while (fgets(line, sizeof(line), fp_log)) {
+        if (sscanf(line, "%*s %*s %*s %*s %*s \"%*s %2047s", url) == 1) {
+            CacheNode* node = ht_get(ht, url);
+            if (node) node->hit_count++;
         }
     }
+    fclose(fp_log);
 
-    fclose(fp);
-    return 1;
-}
+    clock_t fim = clock();
+    /* FIM DA MEDIÇÃO */
 
-int main(int argc, char **argv) {
-    const char *log_path = "log_distribuido.txt";
-    const char *manifest_path = "manifest.txt";
-    const char *output_path = "results.csv";
-    HashTable *ht;
-
-    if (argc >= 2) {
-        log_path = argv[1];
-    }
-    if (argc >= 3) {
-        manifest_path = argv[2];
-    }
-    if (argc >= 4) {
-        output_path = argv[3];
-    }
-
-    ht = ht_create(HASH_TABLE_SIZE);
-    if (!ht) {
-        fprintf(stderr, "Falha ao criar hash table.\n");
-        return EXIT_FAILURE;
-    }
-
-    if (!load_manifest(ht, manifest_path)) {
-        ht_destroy(ht);
-        return EXIT_FAILURE;
-    }
-
-    if (!process_log_seq(ht, log_path)) {
-        ht_destroy(ht);
-        return EXIT_FAILURE;
-    }
-
+    /* FASE 3: Resultados */
     ht_save_results(ht, output_path);
+    
+    double elapsed = (double)(fim - inicio) / CLOCKS_PER_SEC;
+    printf("Tempo de processamento: %.3f segundos\n", elapsed);
+
     ht_destroy(ht);
     return EXIT_SUCCESS;
 }
