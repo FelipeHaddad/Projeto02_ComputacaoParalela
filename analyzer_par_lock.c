@@ -7,34 +7,27 @@
 
 #define HASH_SIZE 131071
 #define MAX_LINE_LEN 8192
-#define MAX_LINES 10000000  // 10 milhões de linhas
+#define MAX_LINES 10000000
 
-/**
- * Estrutura para armazenar as linhas do log em memória
- */
+// Define o container que vai manter todas as linhas do log salvas na RAM
 typedef struct {
     char** linhas;
     size_t num_linhas;
 } LogBuffer;
 
-/**
- * Função de Hash (djb2) - mesmo algoritmo de hash_table.c
- * Converte uma string (URL) em um índice para a tabela.
- */
+// Transforma o conteúdo textual da string (URL) em um índice numérico válido para o array de locks
 static size_t hash_djb2(const char* str, size_t size) {
     unsigned long hash = 5381;
     int c;
 
     while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+        hash = ((hash << 5) + hash) + c;
     }
 
     return hash % size;
 }
 
-/**
- * Carrega o log inteiro em memória para melhor paralelização
- */
+// Aloca memória e carrega o arquivo de log para o buffer em memória estruturado
 LogBuffer* load_log_to_memory(const char* log_path) {
     LogBuffer* lb = (LogBuffer*)malloc(sizeof(LogBuffer));
     if (!lb) {
@@ -49,7 +42,6 @@ LogBuffer* load_log_to_memory(const char* log_path) {
         return NULL;
     }
 
-    // Aloca espaço para ponteiros das linhas
     lb->linhas = (char**)malloc(sizeof(char*) * MAX_LINES);
     if (!lb->linhas) {
         perror("Erro ao alocar array de linhas");
@@ -61,7 +53,6 @@ LogBuffer* load_log_to_memory(const char* log_path) {
     lb->num_linhas = 0;
     char line[MAX_LINE_LEN];
 
-    // Lê as linhas e armazena em memória
     while (fgets(line, sizeof(line), fp) && lb->num_linhas < MAX_LINES) {
         size_t len = strlen(line) + 1;
         lb->linhas[lb->num_linhas] = (char*)malloc(len);
@@ -69,7 +60,7 @@ LogBuffer* load_log_to_memory(const char* log_path) {
         if (!lb->linhas[lb->num_linhas]) {
             perror("Erro ao alocar linha");
             fclose(fp);
-            return lb;  // Retorna parcialmente carregado
+            return lb;
         }
 
         strcpy(lb->linhas[lb->num_linhas], line);
@@ -80,9 +71,7 @@ LogBuffer* load_log_to_memory(const char* log_path) {
     return lb;
 }
 
-/**
- * Libera o buffer do log
- */
+// Varre o buffer liberando o espaço de cada linha alocada dinamicamente
 void free_log_buffer(LogBuffer* lb) {
     if (!lb) return;
     for (size_t i = 0; i < lb->num_linhas; i++) {
@@ -102,7 +91,7 @@ int main(int argc, char* argv[]) {
     const char *manifest_path = (argc >= 3) ? argv[2] : "manifest.txt";
     const char *output_path = (argc >= 4) ? argv[3] : "results.csv";
 
-    /* FASE 1: Construir Hash Table (Manifest) */
+    // Aloca a estrutura interna principal da tabela hash
     HashTable* ht = ht_create(HASH_SIZE);
     if (!ht) {
         fprintf(stderr, "Erro ao criar hash table\n");
@@ -118,6 +107,8 @@ int main(int argc, char* argv[]) {
 
     char line[MAX_LINE_LEN];
     size_t manifest_count = 0;
+    
+    // Varre o arquivo de manifesto preenchendo a tabela hash de forma serial
     while (fgets(line, sizeof(line), fp_manifest)) {
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] != '\0') {
@@ -127,7 +118,7 @@ int main(int argc, char* argv[]) {
     }
     fclose(fp_manifest);
 
-    /* FASE 1.5: Inicializar locks para cada bucket */
+    // Aloca um array de travas independentes onde cada índice protege um bucket específico
     omp_lock_t* locks = (omp_lock_t*)malloc(sizeof(omp_lock_t) * HASH_SIZE);
     if (!locks) {
         perror("Erro ao alocar array de locks");
@@ -135,16 +126,17 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    // Inicializa cada um dos locks criados no array para deixá-los prontos para uso
     for (size_t i = 0; i < HASH_SIZE; i++) {
         omp_init_lock(&locks[i]);
     }
 
-    /* FASE 2: Carregar log em memória */
+    // Dispara a leitura completa do log em disco direto para a memória RAM
     LogBuffer* log_buffer = load_log_to_memory(log_path);
     if (!log_buffer) {
         fprintf(stderr, "Erro ao carregar log\n");
         
-        // Limpeza dos locks antes de sair
+        // Garante a desmontagem correta dos locks caso o programa falhe ao carregar o log
         for (size_t i = 0; i < HASH_SIZE; i++) {
             omp_destroy_lock(&locks[i]);
         }
@@ -153,59 +145,57 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    /* FASE 3: Processamento do Log em PARALELO com BUCKET LOCKS */
+    // Dispara o cronômetro
     clock_t inicio = clock();
 
+    // Cria a região paralela que invoca múltiplas threads ao mesmo tempo
     #pragma omp parallel
     {
         char url[2048];
         
+        // Reparte de forma paralela as iterações do laço de repetição entre os núcleos
         #pragma omp for
         for (size_t i = 0; i < log_buffer->num_linhas; i++) {
-            // Extrai a URL da linha
+            // Analisa o texto do log para filtrar o campo específico da URL solicitado
             if (sscanf(log_buffer->linhas[i], "%*s %*s %*s %*s %*s \"%*s %2047s", url) == 1) {
                 CacheNode* node = ht_get(ht, url);
                 
                 if (node) {
-                    // BUCKET LOCK: Sincronização granular por bucket
-                    // 1. Calcula o índice (bucket) baseado na URL
+                    // Identifica qual bucket guarda essa URL específica
                     size_t bucket = hash_djb2(url, HASH_SIZE);
                     
-                    // 2. Adquire o lock do bucket
+                    // Bloqueia temporariamente apenas o bucket correspondente à URL atual
                     omp_set_lock(&locks[bucket]);
                     
-                    // 3. Atualiza o contador (seção crítica do bucket)
+                    // Incrementa de forma segura o contador de acessos do nó
                     node->hit_count++;
                     
-                    // 4. Libera o lock do bucket
+                    // Libera imediatamente a trava do bucket para outras threads acessarem
                     omp_unset_lock(&locks[bucket]);
                 }
             }
         }
     }
 
+    // Interrompe o cronômetro
     clock_t fim = clock();
     double elapsed = (double)(fim - inicio) / CLOCKS_PER_SEC;
-    /* FIM DA MEDIÇÃO */
 
-    /* FASE 4: Salvar resultados */
+    // Salva todo o mapeamento consolidado de dados no arquivo final em formato CSV
     ht_save_results(ht, output_path);
-
-    /* Estatísticas finais */
 
     printf("Tempo de processamento: %.3f segundos\n", elapsed);
 
-
-
-    /* Limpeza */
+    // Desaloca o buffer de linhas do log
     free_log_buffer(log_buffer);
     
-    // Destruir todos os locks
+    // Percorre destruindo e liberando a memória ocupada pelo sistema de travas
     for (size_t i = 0; i < HASH_SIZE; i++) {
         omp_destroy_lock(&locks[i]);
     }
     free(locks);
     
+    // Libera a tabela hash inteira
     ht_destroy(ht);
 
     return EXIT_SUCCESS;
