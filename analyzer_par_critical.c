@@ -7,19 +7,15 @@
 
 #define HASH_SIZE 131071
 #define MAX_LINE_LEN 8192
-#define MAX_LINES 10000000  // 10 milhões de linhas
+#define MAX_LINES 10000000
 
-/**
- * Estrutura para armazenar as linhas do log em memória
- */
+// Estrutura que vai guardar os ponteiros das linhas lidas
 typedef struct {
     char** linhas;
     size_t num_linhas;
 } LogBuffer;
 
-/**
- * Carrega o log inteiro em memória para melhor paralelização
- */
+// Transfere o arquivo de log do disco para a memória RAM
 LogBuffer* load_log_to_memory(const char* log_path) {
     LogBuffer* lb = (LogBuffer*)malloc(sizeof(LogBuffer));
     if (!lb) {
@@ -34,7 +30,7 @@ LogBuffer* load_log_to_memory(const char* log_path) {
         return NULL;
     }
 
-    // Aloca espaço para ponteiros das linhas
+    // Cria a tabela de ponteiros para armazenar cada linha individualmente
     lb->linhas = (char**)malloc(sizeof(char*) * MAX_LINES);
     if (!lb->linhas) {
         perror("Erro ao alocar array de linhas");
@@ -46,7 +42,7 @@ LogBuffer* load_log_to_memory(const char* log_path) {
     lb->num_linhas = 0;
     char line[MAX_LINE_LEN];
 
-    // Lê as linhas e armazena em memória
+    // Varre o arquivo alocando o tamanho exato de cada string na memória
     while (fgets(line, sizeof(line), fp) && lb->num_linhas < MAX_LINES) {
         size_t len = strlen(line) + 1;
         lb->linhas[lb->num_linhas] = (char*)malloc(len);
@@ -54,7 +50,7 @@ LogBuffer* load_log_to_memory(const char* log_path) {
         if (!lb->linhas[lb->num_linhas]) {
             perror("Erro ao alocar linha");
             fclose(fp);
-            return lb;  // Retorna parcialmente carregado
+            return lb;
         }
 
         strcpy(lb->linhas[lb->num_linhas], line);
@@ -65,9 +61,7 @@ LogBuffer* load_log_to_memory(const char* log_path) {
     return lb;
 }
 
-/**
- * Libera o buffer do log
- */
+// Desaloca todas as strings e estruturas do buffer de log
 void free_log_buffer(LogBuffer* lb) {
     if (!lb) return;
     for (size_t i = 0; i < lb->num_linhas; i++) {
@@ -87,9 +81,7 @@ int main(int argc, char* argv[]) {
     const char *manifest_path = (argc >= 3) ? argv[2] : "manifest.txt";
     const char *output_path = (argc >= 4) ? argv[3] : "results.csv";
 
-
-
-    /* FASE 1: Construir Hash Table (Manifest) */
+    // Inicializa a tabela hash vazia para o manifesto
     HashTable* ht = ht_create(HASH_SIZE);
     if (!ht) {
         fprintf(stderr, "Erro ao criar hash table\n");
@@ -105,6 +97,8 @@ int main(int argc, char* argv[]) {
 
     char line[MAX_LINE_LEN];
     size_t manifest_count = 0;
+    
+    // Alimenta a tabela hash sequencialmente com as URLs mapeadas no manifesto
     while (fgets(line, sizeof(line), fp_manifest)) {
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] != '\0') {
@@ -114,7 +108,7 @@ int main(int argc, char* argv[]) {
     }
     fclose(fp_manifest);
 
-    /* FASE 2: Carregar log em memória */
+    // Invoca a função que joga o log para a memória RAM antes do processamento paralelo
     LogBuffer* log_buffer = load_log_to_memory(log_path);
     if (!log_buffer) {
         fprintf(stderr, "Erro ao carregar log\n");
@@ -122,21 +116,24 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    /* FASE 3: Processamento do Log em PARALELO com CRITICAL */
+    // Início do cronômetro
     clock_t inicio = clock();
 
+    // Cria a equipe de threads concorrentes do OpenMP
     #pragma omp parallel
     {
         char url[2048];
         
+        // Distribui de forma automática as linhas do buffer entre as threads
         #pragma omp for
         for (size_t i = 0; i < log_buffer->num_linhas; i++) {
-            // Extrai a URL da linha
+            // Faz a filtragem e extração da URL presente na linha atual
             if (sscanf(log_buffer->linhas[i], "%*s %*s %*s %*s %*s \"%*s %2047s", url) == 1) {
                 CacheNode* node = ht_get(ht, url);
                 
                 if (node) {
-                    // REGIÃO CRÍTICA: Atualiza o contador
+                    // Sincronização por exclusão mútua global
+                    // Força com que apenas uma thread por vez execute este trecho de código, independente de qual seja o nó
                     #pragma omp critical
                     {
                         node->hit_count++;
@@ -146,18 +143,16 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Fim da área paralelizada e parada do cronômetro
     clock_t fim = clock();
     double elapsed = (double)(fim - inicio) / CLOCKS_PER_SEC;
-    /* FIM DA MEDIÇÃO */
 
-    /* FASE 4: Salvar resultados */
+    // Exporta os dados consolidados da tabela para o arquivo CSV de saída
     ht_save_results(ht, output_path);
 
-    /* Estatísticas finais */
     printf("Tempo de processamento: %.3f segundos\n", elapsed);
 
-
-    /* Limpeza */
+    // Faz a limpeza completa de toda a memória dinâmica que foi utilizada
     free_log_buffer(log_buffer);
     ht_destroy(ht);
 
